@@ -1,123 +1,224 @@
-const BASE_URL = 'http://localhost:3001';
-const DEFAULT_TIMEOUT_MS = 10000;
+const STORAGE_KEY = 'todos_v1';
+const LATENCY_MS = 150; // small artificial delay for UX
 
 /**
- * Perform a fetch with a timeout and structured error handling.
- * Adds verbose console diagnostics on failure to help triage CORS/port/path issues.
- * @param {string} url - Full URL to fetch
- * @param {RequestInit} options - Fetch options
- * @param {number} timeoutMs - Timeout in milliseconds
- * @returns {Promise<any>} - Parsed JSON response
+ * Internal: read all todos from localStorage.
+ * Ensures an array is always returned, with minimal seed data on first run.
  */
-async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  const reqInfo = {
-    url,
-    method: options.method || 'GET',
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-    hasBody: Boolean(options.body),
-  };
-
+function readTodos() {
   try {
-    const res = await fetch(url, {
-      ...options,
-      headers: reqInfo.headers,
-      signal: controller.signal,
-    });
-
-    const contentType = res.headers.get('content-type') || '';
-    let data = null;
-    if (contentType.includes('application/json')) {
-      try {
-        data = await res.json();
-      } catch (_) {
-        // ignore parse error, keep data as null
-      }
-    } else {
-      // Attempt to parse text for better diagnostics
-      try {
-        data = await res.text();
-      } catch (_) {
-        // ignore
-      }
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      const seeded = seedData();
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
+      return seeded;
     }
-
-    if (!res.ok) {
-      const err = new Error('Request failed');
-      err.status = res.status;
-      err.statusText = res.statusText;
-      err.data = data;
-      err.url = url;
-      // Log detailed diagnostics to console for debugging
-      // This helps differentiate network errors vs. backend HTTP errors.
-      // eslint-disable-next-line no-console
-      console.error('API HTTP error', { request: reqInfo, response: { status: res.status, statusText: res.statusText, data } });
-      throw err;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      const seeded = seedData();
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
+      return seeded;
     }
-
-    return data;
-  } catch (error) {
-    if (error.name === 'AbortError') {
-      const err = new Error('Request timed out');
-      err.code = 'ETIMEOUT';
-      err.url = url;
-      // eslint-disable-next-line no-console
-      console.error('API timeout', { request: reqInfo });
-      throw err;
-    }
-    // Network or CORS issues will land here with TypeError in browsers.
-    if (!error.status) {
-      error.status = 0;
-    }
-    // eslint-disable-next-line no-console
-    console.error('API network error', { request: reqInfo, error: { name: error.name, message: error.message } });
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
+    return parsed;
+  } catch (_e) {
+    // If any parse/storage error occurs, reset to seed data to keep app functional.
+    const seeded = seedData();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
+    return seeded;
   }
+}
+
+/**
+ * Internal: write todos array to localStorage.
+ */
+function writeTodos(todos) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
+}
+
+/**
+ * Internal: basic id generator using timestamp and random suffix.
+ */
+function generateId() {
+  return `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+}
+
+/**
+ * Internal: create ISO timestamp string.
+ */
+function nowIso() {
+  return new Date().toISOString();
+}
+
+/**
+ * Internal: provide minimal seed data on first load.
+ */
+function seedData() {
+  const createdAt = nowIso();
+  return [
+    {
+      id: generateId(),
+      title: 'Welcome to your Todo App',
+      description: 'Use the form above to add, edit, toggle, and delete tasks.',
+      completed: false,
+      created_at: createdAt,
+      updated_at: createdAt,
+    },
+    {
+      id: generateId(),
+      title: 'Try toggling this task',
+      description: 'Click the checkbox to mark as complete/incomplete.',
+      completed: true,
+      created_at: createdAt,
+      updated_at: createdAt,
+    },
+  ];
+}
+
+/**
+ * Internal: simulate small network latency by delaying resolution.
+ */
+function withLatency(result) {
+  return new Promise((resolve) => {
+    setTimeout(() => resolve(result), LATENCY_MS);
+  });
+}
+
+/**
+ * Internal: sanitize input fields.
+ */
+function sanitizeText(v) {
+  if (typeof v !== 'string') return '';
+  const trimmed = v.trim();
+  // Enforce a max length similar to backend constraint to keep UX consistent.
+  return trimmed.slice(0, 255);
 }
 
 // PUBLIC_INTERFACE
 export async function getTodos() {
-  /** Fetch all todos from backend. Returns an array of todos. */
-  return fetchWithTimeout(`${BASE_URL}/api/todos`, {
-    method: 'GET',
-  });
+  /** Return all todos from localStorage. */
+  const todos = readTodos();
+  // Return a shallow copy to avoid external mutation.
+  return withLatency([...todos]);
 }
 
 // PUBLIC_INTERFACE
 export async function createTodo({ title, description = '' }) {
-  /** Create a new todo. Requires title; description optional. Returns created todo. */
-  return fetchWithTimeout(`${BASE_URL}/api/todos`, {
-    method: 'POST',
-    body: JSON.stringify({ title, description }),
-  });
+  /** Create a new todo in localStorage and return it. */
+  const todos = readTodos();
+
+  const newTodo = {
+    id: generateId(),
+    title: sanitizeText(title),
+    description: sanitizeText(description),
+    completed: false,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  };
+
+  // Basic validation as UI expects: title required 1..255
+  if (!newTodo.title || newTodo.title.length < 1) {
+    // Do not throw network errors; keep behavior graceful.
+    // Return a rejected promise with a structured error similar to previous humanize expectations.
+    const err = new Error('Validation error: Title is required');
+    err.status = 422;
+    err.data = { detail: 'Title must be between 1 and 255 characters.' };
+    throw err;
+  }
+
+  const next = [newTodo, ...todos];
+  writeTodos(next);
+  return withLatency({ ...newTodo });
 }
 
 // PUBLIC_INTERFACE
 export async function updateTodo(id, { title, description = '', completed = false }) {
-  /** Replace/update a todo by id. Returns updated todo. */
-  return fetchWithTimeout(`${BASE_URL}/api/todos/${encodeURIComponent(id)}`, {
-    method: 'PUT',
-    body: JSON.stringify({ title, description, completed }),
-  });
+  /** Replace/update a todo by id and return updated entity. */
+  const todos = readTodos();
+  const idx = todos.findIndex((t) => t.id === id);
+  if (idx === -1) {
+    const err = new Error('Not found');
+    err.status = 404;
+    err.data = { detail: 'Todo not found' };
+    throw err;
+  }
+
+  const safeTitle = sanitizeText(title);
+  const safeDescription = sanitizeText(description);
+
+  if (!safeTitle || safeTitle.length < 1) {
+    const err = new Error('Validation error: Title is required');
+    err.status = 422;
+    err.data = { detail: 'Title must be between 1 and 255 characters.' };
+    throw err;
+  }
+
+  const updated = {
+    ...todos[idx],
+    title: safeTitle,
+    description: safeDescription,
+    completed: !!completed,
+    updated_at: nowIso(),
+  };
+
+  const next = [...todos];
+  next[idx] = updated;
+  writeTodos(next);
+  return withLatency({ ...updated });
 }
 
 // PUBLIC_INTERFACE
 export async function patchTodo(id, partial) {
-  /** Partially update a todo by id. e.g., { completed: true } */
-  return fetchWithTimeout(`${BASE_URL}/api/todos/${encodeURIComponent(id)}`, {
-    method: 'PATCH',
-    body: JSON.stringify(partial || {}),
-  });
+  /** Partially update a todo by id and return updated entity (e.g., { completed: true }). */
+  const todos = readTodos();
+  const idx = todos.findIndex((t) => t.id === id);
+  if (idx === -1) {
+    const err = new Error('Not found');
+    err.status = 404;
+    err.data = { detail: 'Todo not found' };
+    throw err;
+  }
+
+  const current = todos[idx];
+  const nextFields = { ...partial };
+
+  if (typeof nextFields.title !== 'undefined') {
+    nextFields.title = sanitizeText(nextFields.title);
+    if (!nextFields.title || nextFields.title.length < 1) {
+      const err = new Error('Validation error: Title is required');
+      err.status = 422;
+      err.data = { detail: 'Title must be between 1 and 255 characters.' };
+      throw err;
+    }
+  }
+  if (typeof nextFields.description !== 'undefined') {
+    nextFields.description = sanitizeText(nextFields.description);
+  }
+  if (typeof nextFields.completed !== 'undefined') {
+    nextFields.completed = !!nextFields.completed;
+  }
+
+  const updated = {
+    ...current,
+    ...nextFields,
+    updated_at: nowIso(),
+  };
+
+  const next = [...todos];
+  next[idx] = updated;
+  writeTodos(next);
+  return withLatency({ ...updated });
 }
 
 // PUBLIC_INTERFACE
 export async function deleteTodo(id) {
-  /** Delete a todo by id. Returns success meta or deleted entity per backend. */
-  return fetchWithTimeout(`${BASE_URL}/api/todos/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-  });
+  /** Delete a todo by id; return meta object for compatibility. */
+  const todos = readTodos();
+  const exists = todos.some((t) => t.id === id);
+  if (!exists) {
+    // Deleting a non-existent item should still resolve gracefully for UX.
+    return withLatency({ success: true, deleted: 0 });
+  }
+  const next = todos.filter((t) => t.id !== id);
+  writeTodos(next);
+  return withLatency({ success: true, deleted: 1 });
 }
