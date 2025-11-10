@@ -3,6 +3,7 @@ const DEFAULT_TIMEOUT_MS = 10000;
 
 /**
  * Perform a fetch with a timeout and structured error handling.
+ * Adds verbose console diagnostics on failure to help triage CORS/port/path issues.
  * @param {string} url - Full URL to fetch
  * @param {RequestInit} options - Fetch options
  * @param {number} timeoutMs - Timeout in milliseconds
@@ -12,13 +13,17 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_M
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
+  const reqInfo = {
+    url,
+    method: options.method || 'GET',
+    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    hasBody: Boolean(options.body),
+  };
+
   try {
     const res = await fetch(url, {
       ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(options.headers || {}),
-      },
+      headers: reqInfo.headers,
       signal: controller.signal,
     });
 
@@ -45,6 +50,10 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_M
       err.statusText = res.statusText;
       err.data = data;
       err.url = url;
+      // Log detailed diagnostics to console for debugging
+      // This helps differentiate network errors vs. backend HTTP errors.
+      // eslint-disable-next-line no-console
+      console.error('API HTTP error', { request: reqInfo, response: { status: res.status, statusText: res.statusText, data } });
       throw err;
     }
 
@@ -54,12 +63,16 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_M
       const err = new Error('Request timed out');
       err.code = 'ETIMEOUT';
       err.url = url;
+      // eslint-disable-next-line no-console
+      console.error('API timeout', { request: reqInfo });
       throw err;
     }
-    // Re-throw with structured properties where possible
+    // Network or CORS issues will land here with TypeError in browsers.
     if (!error.status) {
       error.status = 0;
     }
+    // eslint-disable-next-line no-console
+    console.error('API network error', { request: reqInfo, error: { name: error.name, message: error.message } });
     throw error;
   } finally {
     clearTimeout(timeoutId);
